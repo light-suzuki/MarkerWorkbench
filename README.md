@@ -1,5 +1,10 @@
 # Marker Workbench
 
+[![CI](https://github.com/light-suzuki/MarkerWorkbench/actions/workflows/ci.yml/badge.svg)](https://github.com/light-suzuki/MarkerWorkbench/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/light-suzuki/=semver)](https://github.com/light-suzuki/MarkerWorkbench/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+
 CDS/エキソン、シーケンスプライマー、CAPS設計に絞ったWindows GUI。 | A focused Windows GUI for CDS/exon, sequencing-primer, and CAPS marker workflows.
 
 This is a source-level focused distribution of
