@@ -4,7 +4,7 @@ import type { CapsDesignResponse, CapsMarkerRow } from "../types/caps";
 import { downloadMarkdown, openPrintViewForMarkdown } from "../utils/exportReport";
 import { downloadXlsx } from "../utils/exportXlsx";
 import type { XlsxSheet } from "../utils/exportXlsx";
-import { ensemblGeneUrl, isLocalOnlyDb, navigatorGeneUrl } from "../utils/ensembl";
+import { geneUrlForContext } from "../utils/ensembl";
 import {
   CUSTOM_DB_VALUE,
   FALLBACK_LOCAL_DB_OPTIONS,
@@ -18,6 +18,9 @@ import {
 import type { BlastDbChromosome } from "../types/blast";
 import type { JobInfo } from "../types/jobs";
 import { GelMini } from "./GelMini";
+import { RestrictionPattern } from "./RestrictionPattern";
+import { FeatureSequenceView } from "./FeatureSequenceView";
+import { EnzymePicker } from "./EnzymePicker";
 import { useToast } from "./ToastProvider";
 import { pollJobUntilDone } from "../utils/jobPolling";
 import { JobProgressCard } from "./JobProgressCard";
@@ -162,7 +165,58 @@ const buildTsv = (res: CapsDesignResponse): string => {
   return [header, ...lines].join("\n");
 };
 
-const buildMarkdown = (res: CapsDesignResponse): string => {
+const metadataLines = (meta: CapsDesignResponse["metadata"]): Array<[string, string]> => {
+  if (!meta) return [];
+  const lines: Array<[string, string]> = [
+    ["report_schema", meta.schema_version],
+    ["app_version", meta.app_version],
+    ["primer3", `${meta.primer3.identity} ${meta.primer3.version}`],
+    ["blast", `${meta.blast.identity} ${meta.blast.version}`],
+  ];
+  meta.dbs.forEach((db) => {
+    lines.push([`db_${db.role}`, `${db.label} (${db.db_type})`]);
+  });
+  const c = meta.conditions;
+  lines.push(["product_size", `${c.product_min ?? ""}–${c.product_max ?? ""}`]);
+  lines.push(["primer_num_return", String(c.primer_num_return ?? "")]);
+  lines.push(["max_markers", String(c.max_markers ?? "")]);
+  const enzymes = Array.isArray(c.enzymes) ? (c.enzymes as string[]) : [];
+  const enzymesText = enzymes.length
+    ? `${enzymes.length}種${enzymes.length > 10 ? `（${enzymes.slice(0, 10).join(", ")}…）` : `（${enzymes.join(", ")}）`}`
+    : "-";
+  lines.push(["enzymes", enzymesText]);
+  lines.push(["enzymes_per_primer", String(c.enzymes_per_primer ?? "")]);
+  lines.push(["max_cuts_per_allele", String(c.max_cuts_per_allele ?? "")]);
+  lines.push(["min_fragment_len", String(c.min_fragment_len ?? "")]);
+  lines.push(["require_perfect_primers_in_alt", String(c.require_perfect_primers_in_alt ?? "")]);
+  lines.push(["primer3_tm", `opt=${c.primer3_opt_tm ?? ""} / min=${c.primer3_min_tm ?? ""} / max=${c.primer3_max_tm ?? ""}`]);
+  lines.push([
+    "primer3_length",
+    `min=${c.primer3_min_size ?? ""} / opt=${c.primer3_opt_size ?? ""} / max=${c.primer3_max_size ?? ""}`,
+  ]);
+  lines.push([
+    "primer3_gc",
+    `min=${c.primer3_min_gc ?? ""} / max=${c.primer3_max_gc ?? ""}`,
+  ]);
+  lines.push([
+    "primer3_salt_dna",
+    `salt=${c.primer3_salt_monovalent ?? ""} mM / dna=${c.primer3_dna_conc ?? ""} nM`,
+  ]);
+  const s = meta.specificity;
+  const screenDbs = Array.isArray(s.screen_dbs) ? (s.screen_dbs as string[]) : [];
+  lines.push(["screen_dbs", screenDbs.join(", ") || "-"]);
+  lines.push([
+    "screen_blast",
+    `${s.screen_task ?? ""} evalue=${s.screen_evalue ?? ""} max_target_seqs=${s.blast_max_target_seqs ?? ""} threads=${s.blast_num_threads ?? "auto"}`,
+  ]);
+  lines.push([
+    "alt_mapping",
+    `${s.alt_mapping_task ?? ""} evalue=${s.alt_mapping_evalue ?? ""} min_identity=${s.alt_mapping_min_identity_pct ?? ""}% min_coverage=${s.alt_mapping_min_coverage ?? ""}`,
+  ]);
+  return lines;
+};
+
+export const buildMarkdown = (res: CapsDesignResponse): string => {
   const lines: string[] = [];
   const dt = new Date();
   lines.push("# CAPS プライマー作成レポート");
@@ -174,6 +228,13 @@ const buildMarkdown = (res: CapsDesignResponse): string => {
   );
   lines.push(`- Primer3 生成ペア数: ${res.primer_pairs_generated}`);
   lines.push(`- 返却マーカー数: ${res.markers.length}`);
+  const meta = metadataLines(res.metadata);
+  if (meta.length) {
+    lines.push("");
+    lines.push("## 解析条件（Reproducibility）");
+    lines.push("");
+    meta.forEach(([k, v]) => lines.push(`- ${k}: ${v}`));
+  }
   if (res.warnings?.length) {
     lines.push("");
     lines.push("## Warnings");
@@ -186,28 +247,7 @@ const buildMarkdown = (res: CapsDesignResponse): string => {
   lines.push("| # | Enzyme | Gene | Ref range | Alt range | Ref frag | Alt frag | mismatch |");
   lines.push("| ---: | --- | --- | --- | --- | --- | --- | ---: |");
   res.markers.slice(0, 200).forEach((m) => {
-    const url = ensemblGeneUrl(m.gene_label ?? null);
-    // TODO: markdown report logic update for Navigator (simplified for now to stick to Ensembl for plain text report or update helper?)
-    // For Markdown, we might want to keep simple links. Let's rely on the assumption that if it's local only, we might just put the ID or a Navigator link if possible.
-    // For now, let's leave md simple or use the new helper if we want.
-    // Actually, let's use the helper to get the RIGHT url.
-    // But we need to know if it's local db. Caps result has blast details but here we just have gene_label.
-    // We can infer from the DB context or just check the label pattern?
-    // gene_label alone might be GENE05G... which is Ensembl.
-    // If it's something else, maybe Navigator.
-    // For safety in Markdown, let's stick to ensemblGeneUrl for GENE IDs and maybe nothing for others unless we want to embed localhost links which might not work for sharing.
-    // Let's leave Markdown as is (Ensembl only) to valid external links, or maybe update if user requests.
-    // User request was "ref/ALT except -> Navigator".
-    // So if I have a gene label that is NOT Ensembl, I should link to Navigator?
-    // Markdown is static text, localhost link is fine for personal use.
-    // Let's update it.
-    /*
-    const localOnly = isLocalOnlyDb(...); // We don't have DB context easily here per gene...
-    Actually `m` comes from `res.markers`. `res` has `ref_db`.
-    But genes come from BLAST hits against MANY DBs.
-    Wait, `m.gene_label` is the primary gene label.
-    */
-
+    const url = geneUrlForContext({ geneId: m.gene_label ?? null, dbLabel: res.ref_db });
     const gene = m.gene_label ? (url ? `[${m.gene_label}](${url})` : m.gene_label) : "-";
     lines.push(
       `| ${m.index} | ${m.enzyme} | ${gene} | ${formatRange(m.ref_product_start, m.ref_product_end)} | ${formatRange(m.alt_product_start, m.alt_product_end)} (${m.alt_strand}) | ${formatFragments(m.fragments_ref)} | ${formatFragments(m.fragments_alt)} | ${m.mismatch_count} |`,
@@ -221,7 +261,7 @@ const buildMarkdown = (res: CapsDesignResponse): string => {
   return lines.join("\n");
 };
 
-const buildXlsxSheets = (res: CapsDesignResponse): XlsxSheet[] => {
+export const buildXlsxSheets = (res: CapsDesignResponse): XlsxSheet[] => {
   const dbs = Array.from(new Set(res.markers.flatMap((m) => (m.blast ?? []).map((b) => b.db))));
   const header: Array<string> = [
     "#",
@@ -298,6 +338,7 @@ const buildXlsxSheets = (res: CapsDesignResponse): XlsxSheet[] => {
     ["mapped_by_blast", res.mapped_by_blast ? "true" : "false"],
     ["primer_pairs_generated", res.primer_pairs_generated],
     ["markers", res.markers.length],
+    ...metadataLines(res.metadata).map(([k, v]) => [k, v] as [string, string]),
   ];
 
   return [
@@ -786,11 +827,19 @@ export const CapsPrimerPanel: React.FC = () => {
   }, [result]);
 
   const renderRow = (m: CapsMarkerRow) => {
-    const url = ensemblGeneUrl(m.gene_label ?? null);
     return (
       <tr key={`${m.index}-${m.enzyme}-${m.primer_left}-${m.primer_right}`}>
         <td>{m.index}</td>
-        <td>{m.enzyme}</td>
+        <td>{m.enzyme}<details className="caps-sequence-detail"><summary>切断と増幅配列 / Cleavage &amp; sequence</summary>
+          <RestrictionPattern detail={m.enzyme_detail} />
+          <h4>AA · {formatRange(m.ref_product_start, m.ref_product_end)} · {m.product_len_ref} bp</h4>
+          {m.ref_product_sequence && <FeatureSequenceView sequence={m.ref_product_sequence} primerRanges={[{start:1,end:m.primer_left.length,kind:"left"},{start:m.product_len_ref-m.primer_right.length+1,end:m.product_len_ref,kind:"right"}]} />}
+          <RestrictionPattern detail={m.enzyme_detail} windows={m.ref_cut_windows} />
+          <h4>BB · {formatRange(m.alt_product_start, m.alt_product_end)} · {m.alt_strand} · {m.product_len_alt} bp</h4>
+          {m.alt_product_sequence && <FeatureSequenceView sequence={m.alt_product_sequence} primerRanges={[{start:1,end:m.primer_left.length,kind:"left"},{start:m.product_len_alt-m.primer_right.length+1,end:m.product_len_alt,kind:"right"}]} />}
+          <RestrictionPattern detail={m.enzyme_detail} windows={m.alt_cut_windows} />
+          <p className="seq-hint">計算上の予測です。PCR・消化・ヘテロ接合体の判別はWet検証が必要です。</p>
+        </details></td>
         <td className="blast-desc" style={{ whiteSpace: "normal" }}>
           {m.gene_label ? (
             <EnsemblLinksInline
@@ -862,6 +911,7 @@ export const CapsPrimerPanel: React.FC = () => {
           {(m.blast ?? []).map((b) => (
             <div key={b.db}>
               <strong>{b.db}</strong>: {b.amplicon_count} {b.quality ? `(${b.quality})` : ""}
+              {b.product_sizes?.length ? ` · PCR: ${b.product_sizes.join(" / ")} bp` : ""}
               {b.top_subject && b.top_start != null && b.top_end != null ? (
                 (() => {
                   return (
@@ -886,10 +936,7 @@ export const CapsPrimerPanel: React.FC = () => {
                   {" "}
                   /{" "}
                   {(() => {
-                    const localOnly = isLocalOnlyDb(b.db);
-                    const url = localOnly
-                      ? navigatorGeneUrl({ geneId: b.gene_label, dbLabel: b.db })
-                      : ensemblGeneUrl(b.gene_label);
+                    const url = geneUrlForContext({ geneId: b.gene_label ?? null, dbLabel: b.db });
                     return url ? (
                       <a href={url} target="_blank" rel="noreferrer">
                         {b.gene_label}
@@ -1186,6 +1233,9 @@ export const CapsPrimerPanel: React.FC = () => {
                 <span className="seq-hint">現在 {enzymes.length} 個</span>
               </div>
             </label>
+            <div className="grid-span-2">
+              <EnzymePicker onAdd={name => setEnzymesText(previous => Array.from(new Set([...normalizeEnzymeList(previous),name])).join("\n"))} />
+            </div>
             <label className="seq-label">
               enzymes_per_primer:
               <input className="seq-input" type="number" min={1} max={20} value={enzymesPerPrimer} onChange={(e) => setEnzymesPerPrimer(Math.max(1, Math.min(20, Number(e.target.value) || 2)))} />
