@@ -81,9 +81,8 @@ export const GelMini: React.FC<{
   if (!fragmentsRef?.length && !fragmentsAlt?.length) return <span>-</span>;
 
   return (
-    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-      <GelLane fragments={fragmentsRef ?? []} maxSize={maxSize} height={height} width={width} />
-      <GelLane fragments={fragmentsAlt ?? []} maxSize={maxSize} height={height} width={width} />
+    <div title="予測ゲル / In-silico schematic; Wet validation required" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+      {[["AA",fragmentsRef],["AB",[...fragmentsRef,...fragmentsAlt]],["BB",fragmentsAlt]].map(([label, fragments]) => <div key={String(label)} style={{textAlign:"center"}}><small>{String(label)}</small><GelLane fragments={fragments as number[]} maxSize={maxSize} height={height} width={width} /></div>)}
     </div>
   );
 };
